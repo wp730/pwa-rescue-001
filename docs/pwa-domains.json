@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "updated_at": "2026-05-12",
+  "domains": [
+    "https://b.com",
+    "https://b2.com",
+    "https://b3.com"
+  ],
+  "notice": "Update this file and push to all CDNs. Clients fetch this every PWA launch via message channel."
+}

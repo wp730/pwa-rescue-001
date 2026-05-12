@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+  <title>Loading...</title>
+  <style>
+    html, body {
+      margin: 0; padding: 0; height: 100%;
+      background: #0D0E27; color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    .wrap {
+      height: 100%;
+      display: flex; flex-direction: column;
+      justify-content: center; align-items: center;
+      padding: 24px; box-sizing: border-box;
+      text-align: center;
+    }
+    .spinner {
+      width: 48px; height: 48px;
+      border: 3px solid rgba(255,255,255,0.2);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+      margin-bottom: 20px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    h1 { font-size: 18px; font-weight: 500; margin: 0 0 8px; }
+    p  { font-size: 14px; opacity: 0.7; margin: 4px 0; max-width: 320px; line-height: 1.5; }
+    .fail { display: none; }
+    .fail.show { display: block; }
+    .fail .spinner { display: none; }
+    a { color: #6cf; text-decoration: none; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div id="loading">
+    <div class="spinner"></div>
+    <h1 id="title">Carregando...</h1>
+    <p id="hint">Otimizando a sua conexão</p>
+  </div>
+  <div id="fail" class="fail">
+    <h1>Servidor temporariamente indisponível</h1>
+    <p>Por favor, tente novamente em alguns minutos.</p>
+    <p>Endereço mais recente: <a id="latestLink" href="#" target="_blank">verificar</a></p>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ========== 配置区:部署时按需修改 ==========
+
+  // 备份域名拉取源(多 CDN 兜底,任一存活即可)
+  // 返回 JSON 格式:{ "domains": ["https://b1.com", "https://b2.com", ...], "ver": 1 }
+  var DOMAIN_SOURCES = [
+    'https://YOUR-CDN-1.example.com/pwa-domains.json',
+    'https://YOUR-CDN-2.example.com/pwa-domains.json',
+    'https://raw.githubusercontent.com/YOUR-ORG/YOUR-REPO/main/pwa-domains.json'
+  ];
+
+  // 写死的兜底域名池(动态拉取全失败时使用)
+  var FALLBACK_DOMAINS = [
+    'https://b.com',
+    'https://b2.com'
+  ];
+
+  // 用户最新地址查看页(Telegram 频道、Twitter 等)
+  var LATEST_INFO_URL = 'https://t.me/your_channel';
+
+  // 单个域名探活超时(ms)
+  var PING_TIMEOUT = 2500;
+
+  // 总尝试超时(ms),超过这个时间还没跳走就显示失败页
+  var TOTAL_TIMEOUT = 10000;
+
+  // ===========================================
+
+  var startedAt = Date.now();
+  var tail = location.search + location.hash;
+
+  function $(id) { return document.getElementById(id); }
+
+  function showFail() {
+    $('loading').style.display = 'none';
+    $('fail').classList.add('show');
+    $('latestLink').href = LATEST_INFO_URL;
+  }
+
+  function jumpTo(base) {
+    // base 末尾去斜杠,tail 已带 ? 或 #
+    base = base.replace(/\/+$/, '');
+    location.replace(base + '/' + tail);
+  }
+
+  // 用 fetch 探活,no-cors 下只要 TCP/TLS 通就算成功
+  function ping(url) {
+    return new Promise(function (resolve) {
+      if (!url) return resolve(false);
+      var ctrl = ('AbortController' in window) ? new AbortController() : null;
+      var timer = setTimeout(function () {
+        if (ctrl) ctrl.abort();
+        resolve(false);
+      }, PING_TIMEOUT);
+
+      fetch(url + '/favicon.ico?_=' + Date.now(), {
+        method: 'GET',
+        mode: 'no-cors',
+        cache: 'no-store',
+        signal: ctrl ? ctrl.signal : undefined
+      }).then(function () {
+        clearTimeout(timer);
+        resolve(true);
+      })['catch'](function () {
+        clearTimeout(timer);
+        resolve(false);
+      });
+    });
+  }
+
+  // 从多个 CDN 拉备份域名列表,谁先返回用谁
+  function fetchDomainList() {
+    var promises = DOMAIN_SOURCES.map(function (src) {
+      return new Promise(function (resolve, reject) {
+        var ctrl = ('AbortController' in window) ? new AbortController() : null;
+        var timer = setTimeout(function () {
+          if (ctrl) ctrl.abort();
+          reject();
+        }, PING_TIMEOUT);
+
+        fetch(src + (src.indexOf('?') === -1 ? '?' : '&') + '_=' + Date.now(), {
+          cache: 'no-store',
+          signal: ctrl ? ctrl.signal : undefined
+        })
+          .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
+          .then(function (data) {
+            clearTimeout(timer);
+            if (data && Array.isArray(data.domains) && data.domains.length) {
+              resolve(data.domains);
+            } else {
+              reject();
+            }
+          })
+          ['catch'](function () {
+            clearTimeout(timer);
+            reject();
+          });
+      });
+    });
+
+    // Promise.any 的 polyfill:任一成功就返回
+    return new Promise(function (resolve) {
+      var failed = 0;
+      promises.forEach(function (p) {
+        p.then(resolve)['catch'](function () {
+          failed++;
+          if (failed === promises.length) resolve(null);
+        });
+      });
+    });
+  }
+
+  // 主流程
+  (function main() {
+    // 总超时兜底
+    var totalTimer = setTimeout(showFail, TOTAL_TIMEOUT);
+
+    fetchDomainList().then(function (dynamicList) {
+      var pool = (dynamicList && dynamicList.length) ? dynamicList : FALLBACK_DOMAINS;
+
+      // 依次探活
+      function tryNext(i) {
+        if (i >= pool.length) {
+          clearTimeout(totalTimer);
+          showFail();
+          return;
+        }
+        ping(pool[i]).then(function (ok) {
+          if (ok) {
+            clearTimeout(totalTimer);
+            jumpTo(pool[i]);
+          } else {
+            tryNext(i + 1);
+          }
+        });
+      }
+      tryNext(0);
+    });
+  })();
+})();
+</script>
+</body>
+</html>
